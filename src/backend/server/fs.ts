@@ -574,6 +574,22 @@ fsRouter.post("/get", async (c) => {
       sign && rawUrl && !/[?&]sign=/.test(rawUrl)
         ? `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}sign=${sign}`
         : rawUrl
+
+    // 115Open 的下载地址已经在驱动层按当前客户端 User-Agent 获取。
+    // 直接交给前端播放器，省去先请求 /api/d 再解析一次文件并重定向的往返。
+    let responseRawUrl = rawUrlWithSign
+    const normalizedProvider = String(provider || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "")
+    if (normalizedProvider === "115open" && item.raw_url) {
+      try {
+        const direct = new URL(item.raw_url)
+        if (direct.protocol === "https:") {
+          responseRawUrl = direct.toString()
+        }
+      } catch {}
+    }
+
     const writable = canWrite(user) && canWriteMeta(user, meta, reqPath)
     const writeContentBypass = canWriteContentBypassUserPerms(meta, reqPath)
 
@@ -626,7 +642,7 @@ fsRouter.post("/get", async (c) => {
         sign,
         thumb: (item as any).thumb || "",
         type: item.type ?? 0,
-        raw_url: rawUrlWithSign,
+        raw_url: responseRawUrl,
         readme: getReadme(meta, reqPath),
         header: getHeader(meta, reqPath),
         provider,
