@@ -218,9 +218,11 @@ export class Pan115Client {
         if (retryState !== false && retryState !== undefined) {
           return body
         }
-        throw new Error(
+        const err: any = new Error(
           `115 网盘 API 错误（code ${body?.code} ${body?.message}）`,
         )
+        err.code = Number(body?.code ?? 0)
+        throw err
       }
       // 对象不存在错误（430004）——SDK ErrObjectNotFound
       if (code === ERR_OBJECT_NOT_FOUND) {
@@ -228,9 +230,11 @@ export class Pan115Client {
         err.code = ERR_OBJECT_NOT_FOUND
         throw err
       }
-      throw new Error(
+      const err: any = new Error(
         `115 网盘 API 错误（code ${code} ${body?.message || ""}）`,
       )
+      err.code = code
+      throw err
     }
     return body
   }
