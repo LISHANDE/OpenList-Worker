@@ -191,8 +191,15 @@ export class Pan115Driver implements StorageDriver {
         return info.file_id
       }
     } catch (e: any) {
-      // folder/get_info 只支持目录路径：参数错误(990002)/不存在(430004) → 回退逐层
-      if (e?.code !== ERR_OBJECT_NOT_FOUND && e?.code !== 990002) throw e
+      // folder/get_info 在部分有效路径上也会返回 20009（父目录不存在）。
+      // 这些错误都回退到逐级列目录解析，避免冷启动节点因没有 fid 缓存而概率失败。
+      if (
+        e?.code !== ERR_OBJECT_NOT_FOUND &&
+        e?.code !== 990002 &&
+        e?.code !== 20009
+      ) {
+        throw e
+      }
     }
     // 逐层解析
     const segs = clean.split("/").filter(Boolean)
