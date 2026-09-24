@@ -4,6 +4,7 @@
 import {
   StorageDriver,
   FileItem,
+  DriverGetOptions,
   calcFileType,
 } from "../../internal/driver/base"
 import { sortFileItems } from "../../internal/driver/sort"
@@ -280,8 +281,16 @@ export class Pan115Driver implements StorageDriver {
     throw new Error(`file not found: ${rawName}`)
   }
 
-  async get(_virtualPath: string, physicalPath: string): Promise<FileItem> {
+  async get(
+    _virtualPath: string,
+    physicalPath: string,
+    options: DriverGetOptions = {},
+  ): Promise<FileItem> {
     this.budget.used = 0
+    // 115 download URLs are bound to the User-Agent supplied to downurl.
+    // Bind the URL to the actual browser/WebDAV client that will follow our
+    // redirect; otherwise mobile clients receive 403 / endless reconnects.
+    const downloadUA = options.userAgent?.trim() || OPENLIST_UA
     const clean =
       "/" +
       String(physicalPath || "")
@@ -304,18 +313,18 @@ export class Pan115Driver implements StorageDriver {
     if (file.fc !== "0" && file.pc) {
       try {
         // 链接缓存（Go LinkCacheMode=UA）：同一 文件+UA 复用链接，节省 downurl 配额
-        const cacheKey = `${file.fid}|${OPENLIST_UA}`
+        const cacheKey = `${file.fid}|${downloadUA}`
         const cached = this.linkCache.get(cacheKey)
         if (cached && cached.expire > Date.now()) {
           item.raw_url = cached.url
-          item.raw_url_headers = { "User-Agent": OPENLIST_UA }
+          item.raw_url_headers = { "User-Agent": downloadUA }
         } else {
           if (!this.reserve()) throw new Error("subrequest budget exceeded")
-          const resp = await this.client.downUrl(file.pc, OPENLIST_UA)
+          const resp = await this.client.downUrl(file.pc, downloadUA)
           const entry = resp[file.fid]
           if (entry?.url?.url) {
             item.raw_url = entry.url.url
-            item.raw_url_headers = { "User-Agent": OPENLIST_UA }
+            item.raw_url_headers = { "User-Agent": downloadUA }
             this.linkCache.set(cacheKey, {
               url: entry.url.url,
               expire: Date.now() + Pan115Driver.LINK_TTL_MS,
