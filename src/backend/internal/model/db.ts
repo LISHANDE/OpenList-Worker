@@ -2232,8 +2232,16 @@ export async function resolvePath(virtualPath: string, envCtx?: any) {
         addition = {}
       }
       const defaultRoot = "/"
-      let rootFolder =
-        addition.root_folder_path !== undefined
+      const normalizedDriver = String(storage.driver || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "")
+      // 115 Open selects its root by root_id. Applying the generic
+      // root_folder_path as well can prepend the mount name a second time
+      // (/115/JAV -> /115/JAV), producing a phantom "115" directory.
+      const driverManagesRoot = normalizedDriver === "115open"
+      let rootFolder = driverManagesRoot
+        ? defaultRoot
+        : addition.root_folder_path !== undefined
           ? addition.root_folder_path
           : defaultRoot
 
