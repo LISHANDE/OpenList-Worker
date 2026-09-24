@@ -150,15 +150,28 @@ webdavRouter.all("/*", async (c) => {
       case "GET":
       case "HEAD": {
         if (!canRead) return c.text("Forbidden", 403)
-        const { item, rawUrl } = await getItem(davPath, ctx)
+        const { item, rawUrl, provider } = await getItem(davPath, ctx)
         if (!item) return c.text("Not found", 404)
         if (item.is_dir) return c.text("Is a directory", 400)
-        // 重定向到 rawRouter 实际下载；rawRouter 已处理所有驱动的下载协议
-        // （proxy/redirect/stream + Range + SSRF 防护）。
-        //
-        // 端点前缀（/p 还是 /d）与路径编码都由 getItem 决定（见
-        // op/storage.ts resolveRawUrlPrefix）：/p 受 Go canProxy() 限制，未开启
-        // 代理的存储会 403 proxy not allowed，因此不能在这里硬编码 /p。
+
+        // 115 Open 的直链已按当前 WebDAV 客户端 UA 生成。直接把播放器重定向
+        // 到 115 CDN，省掉 /api/d 的第二次文件解析；短时缓存 302，播放器在
+        // 拖动进度条反复发 Range 请求时可复用同一条临时直链。
+        const normalizedProvider = String(provider || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "")
+        if (normalizedProvider === "115open" && item.raw_url) {
+          try {
+            const direct = new URL(item.raw_url)
+            if (direct.protocol === "https:") {
+              c.header("Cache-Control", "private, max-age=600")
+              return c.redirect(direct.toString(), 302)
+            }
+          } catch {}
+        }
+
+        // 其他驱动仍重定向到 rawRouter；它会按存储策略处理
+        // proxy/redirect/stream、Range、签名与 SSRF 防护。
         return c.redirect(
           rawUrl || `/api/d${encodeDownloadPath(davPath)}`,
           302,
