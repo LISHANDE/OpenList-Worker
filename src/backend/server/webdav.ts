@@ -155,8 +155,8 @@ webdavRouter.all("/*", async (c) => {
         if (item.is_dir) return c.text("Is a directory", 400)
 
         // 115 Open 的直链已按当前 WebDAV 客户端 UA 生成。直接把播放器重定向
-        // 到 115 CDN，省掉 /api/d 的第二次文件解析；短时缓存 302，播放器在
-        // 拖动进度条反复发 Range 请求时可复用同一条临时直链。
+        // 到 115 CDN，省掉 /api/d 的第二次文件解析；短时缓存重定向，播放器
+        // 在拖动进度条反复发 Range 请求时可复用同一条临时直链。
         const normalizedProvider = String(provider || "")
           .toLowerCase()
           .replace(/[^a-z0-9]/g, "")
