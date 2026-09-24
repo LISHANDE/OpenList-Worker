@@ -25,18 +25,17 @@ import { encodeDownloadPath } from "../pkg/path"
 export const webdavRouter = new Hono()
 
 const getStorageRequestContext = (c: any) => {
+  const context: Record<string, any> = {
+    env: c.env, // 传递 env 用于请求级 KV 缓存复用
+    userAgent: c.req.header("User-Agent") || "",
+  }
   try {
     const executionCtx = c.executionCtx
-    if (!executionCtx || typeof executionCtx.waitUntil !== "function") {
-      return undefined
+    if (executionCtx && typeof executionCtx.waitUntil === "function") {
+      context.waitUntil = (p: Promise<unknown>) => executionCtx.waitUntil(p)
     }
-    return {
-      waitUntil: (p: Promise<unknown>) => executionCtx.waitUntil(p),
-      env: c.env, // 传递 env 用于请求级 KV 缓存复用
-    }
-  } catch {
-    return undefined
-  }
+  } catch {}
+  return context
 }
 
 /** Basic Auth 或 Bearer token 认证，返回用户对象（未认证返回 null） */
