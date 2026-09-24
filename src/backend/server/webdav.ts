@@ -164,8 +164,15 @@ webdavRouter.all("/*", async (c) => {
           try {
             const direct = new URL(item.raw_url)
             if (direct.protocol === "https:") {
+              // 307 keeps GET + Range semantics across the redirect. The short
+              // private cache lets capable clients reuse the UA-bound 115 link.
               c.header("Cache-Control", "private, max-age=600")
-              return c.redirect(direct.toString(), 302)
+              c.header(
+                "Expires",
+                new Date(Date.now() + 10 * 60 * 1000).toUTCString(),
+              )
+              c.header("Vary", "Authorization, User-Agent")
+              return c.redirect(direct.toString(), 307)
             }
           } catch {}
         }
