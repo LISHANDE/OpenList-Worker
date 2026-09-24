@@ -31,7 +31,8 @@
     }
   ],
   "cloudFunctions": {
-    "maxDuration": 120
+    "maxDuration": 120,
+    "overseasRegions": ["ap-hongkong"]
   },
   "schedules": [
     {
