@@ -56,6 +56,14 @@ export class Pan115Driver implements StorageDriver {
   private parentPath = "/"
   /** cache: 物理路径 → fid（复用） */
   private fidCache = new Map<string, string>()
+  /** 浏览目录时顺便缓存文件元数据，避免点击播放后再次列父目录。 */
+  private fileCache = new Map<string, Pan115File>()
+  /** 短时目录缓存：同一预览请求获取 related 时不再重复调用 115。 */
+  private dirListCache = new Map<
+    string,
+    { files: Pan115File[]; expire: number }
+  >()
+  private static readonly META_TTL_MS = 5 * 60 * 1000
   /** CF subrequest 预算 */
   private budget = { used: 0, limit: SUBREQUEST_LIMIT }
   /**
@@ -140,9 +148,25 @@ export class Pan115Driver implements StorageDriver {
 
   async list(_virtualPath: string, physicalPath: string): Promise<FileItem[]> {
     this.budget.used = 0
-    const cid = await this.resolveFolderId(physicalPath)
-    const items: FileItem[] = []
+    const clean =
+      "/" +
+      String(physicalPath || "")
+        .split("/")
+        .filter(Boolean)
+        .join("/")
+    const cached = this.dirListCache.get(clean)
+    if (cached && cached.expire > Date.now()) {
+      return sortFileItems(
+        cached.files.map(pan115FileToFileItem),
+        this.addition.order_by || "file_name",
+        this.addition.order_direction,
+      )
+    }
+
+    const cid = await this.resolveFolderId(clean)
+    const filesAll: Pan115File[] = []
     let offset = 0
+    let total = 0
     for (;;) {
       if (!this.reserve()) break
       const { files, count } = await this.client.getFiles({
@@ -153,15 +177,25 @@ export class Pan115Driver implements StorageDriver {
         o: this.addition.order_by || "file_name",
         showDir: true,
       })
-      for (const f of files) {
-        items.push(pan115FileToFileItem(f))
-        this.fidCache.set(f.fid, f.fid)
+      total = count
+      for (const file of files) {
+        filesAll.push(file)
+        const childPath = `${clean === "/" ? "" : clean}/${file.fn}`
+        this.fileCache.set(childPath, file)
+        this.fidCache.set(file.fid, file.fid)
+        if (file.fc === "0") this.fidCache.set(childPath, file.fid)
       }
-      if (items.length >= count || files.length === 0) break
+      if (filesAll.length >= count || files.length === 0) break
       offset += files.length
     }
+    if (filesAll.length >= total) {
+      this.dirListCache.set(clean, {
+        files: filesAll,
+        expire: Date.now() + Pan115Driver.META_TTL_MS,
+      })
+    }
     return sortFileItems(
-      items,
+      filesAll.map(pan115FileToFileItem),
       this.addition.order_by || "file_name",
       this.addition.order_direction,
     )
@@ -248,6 +282,8 @@ export class Pan115Driver implements StorageDriver {
         .split("/")
         .filter(Boolean)
         .join("/")
+    const cachedFile = this.fileCache.get(clean)
+    if (cachedFile) return cachedFile
     const segs = clean.split("/").filter(Boolean)
     const rawName = segs.pop() || ""
     if (!rawName) throw new Error(`file not found: ${clean}`)
@@ -274,6 +310,11 @@ export class Pan115Driver implements StorageDriver {
         o: "file_name",
         showDir: true,
       })
+      for (const file of files) {
+        const childPath = `${parentPath === "/" ? "" : parentPath}/${file.fn}`
+        this.fileCache.set(childPath, file)
+        if (file.fc === "0") this.fidCache.set(childPath, file.fid)
+      }
       const hit = files.find(
         (f) =>
           f.fn === rawName ||
@@ -281,7 +322,10 @@ export class Pan115Driver implements StorageDriver {
           f.fid === rawName ||
           f.fid === decodedName,
       )
-      if (hit) return hit
+      if (hit) {
+        this.fileCache.set(clean, hit)
+        return hit
+      }
       if (files.length === 0 || offset + files.length >= count) break
       offset += files.length
     }
