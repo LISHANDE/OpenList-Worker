@@ -502,7 +502,9 @@ rawRouter.get("/*", async (c) => {
           )
           let fileItem
           try {
-            fileItem = await driver.get(reqPath, resolved.physical)
+            fileItem = await driver.get(reqPath, resolved.physical, {
+              userAgent: c.req.header("User-Agent") || "",
+            })
           } finally {
             await flushPendingDriverState(
               resolved.storage.driver,
