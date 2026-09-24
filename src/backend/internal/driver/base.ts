@@ -136,10 +136,19 @@ export function calcFileType(name: string, isDir: boolean): number {
   return 0 // UNKNOWN
 }
 
+export interface DriverGetOptions {
+  /** User-Agent of the client that will follow the download redirect. */
+  userAgent?: string
+}
+
 export interface StorageDriver {
   init?(): Promise<void>
   list(virtualPath: string, physicalPath: string): Promise<FileItem[]>
-  get(virtualPath: string, physicalPath: string): Promise<FileItem>
+  get(
+    virtualPath: string,
+    physicalPath: string,
+    options?: DriverGetOptions,
+  ): Promise<FileItem>
   mkdir(virtualPath: string, physicalPath: string): Promise<void>
   rename(
     virtualPath: string,
