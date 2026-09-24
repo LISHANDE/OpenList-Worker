@@ -57,7 +57,10 @@ export class Pan115Driver implements StorageDriver {
   /** cache: 物理路径 → fid（复用） */
   private fidCache = new Map<string, string>()
   /** 浏览目录时顺便缓存文件元数据，避免点击播放后再次列父目录。 */
-  private fileCache = new Map<string, Pan115File>()
+  private fileCache = new Map<
+    string,
+    { file: Pan115File; expire: number }
+  >()
   /** 短时目录缓存：同一预览请求获取 related 时不再重复调用 115。 */
   private dirListCache = new Map<
     string,
@@ -181,9 +184,14 @@ export class Pan115Driver implements StorageDriver {
       for (const file of files) {
         filesAll.push(file)
         const childPath = `${clean === "/" ? "" : clean}/${file.fn}`
-        this.fileCache.set(childPath, file)
-        this.fidCache.set(file.fid, file.fid)
-        if (file.fc === "0") this.fidCache.set(childPath, file.fid)
+        this.fileCache.set(childPath, {
+          file,
+          expire: Date.now() + Pan115Driver.META_TTL_MS,
+        })
+        if (file.fc === "0") {
+          this.fidCache.set(file.fid, file.fid)
+          this.fidCache.set(childPath, file.fid)
+        }
       }
       if (filesAll.length >= count || files.length === 0) break
       offset += files.length
@@ -283,7 +291,8 @@ export class Pan115Driver implements StorageDriver {
         .filter(Boolean)
         .join("/")
     const cachedFile = this.fileCache.get(clean)
-    if (cachedFile) return cachedFile
+    if (cachedFile && cachedFile.expire > Date.now()) return cachedFile.file
+    if (cachedFile) this.fileCache.delete(clean)
     const segs = clean.split("/").filter(Boolean)
     const rawName = segs.pop() || ""
     if (!rawName) throw new Error(`file not found: ${clean}`)
@@ -312,7 +321,10 @@ export class Pan115Driver implements StorageDriver {
       })
       for (const file of files) {
         const childPath = `${parentPath === "/" ? "" : parentPath}/${file.fn}`
-        this.fileCache.set(childPath, file)
+        this.fileCache.set(childPath, {
+          file,
+          expire: Date.now() + Pan115Driver.META_TTL_MS,
+        })
         if (file.fc === "0") this.fidCache.set(childPath, file.fid)
       }
       const hit = files.find(
@@ -323,7 +335,10 @@ export class Pan115Driver implements StorageDriver {
           f.fid === decodedName,
       )
       if (hit) {
-        this.fileCache.set(clean, hit)
+        this.fileCache.set(clean, {
+          file: hit,
+          expire: Date.now() + Pan115Driver.META_TTL_MS,
+        })
         return hit
       }
       if (files.length === 0 || offset + files.length >= count) break
