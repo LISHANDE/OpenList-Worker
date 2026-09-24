@@ -71,18 +71,18 @@ export const fsRouter = new Hono()
 fsRouter.route("/seed", seedRouter)
 
 const getStorageRequestContext = (c: any) => {
+  const context: Record<string, any> = {
+    env: c.env, // 传递 env 用于请求级 KV 缓存复用
+    userAgent: c.req.header("User-Agent") || "",
+  }
   try {
     const executionCtx = c.executionCtx
-    if (!executionCtx || typeof executionCtx.waitUntil !== "function") {
-      return undefined
+    if (executionCtx && typeof executionCtx.waitUntil === "function") {
+      context.waitUntil = (promise: Promise<unknown>) =>
+        executionCtx.waitUntil(promise)
     }
-    return {
-      waitUntil: (promise: Promise<unknown>) => executionCtx.waitUntil(promise),
-      env: c.env, // 传递 env 用于请求级 KV 缓存复用
-    }
-  } catch {
-    return undefined
-  }
+  } catch {}
+  return context
 }
 
 // ---- 写操作权限校验 ----
