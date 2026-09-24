@@ -287,7 +287,6 @@ async function createDriver(
   } else if (
     normDriver === "115" ||
     normDriver === "115cloud" ||
-    normDriver === "115open" ||
     normDriver === "115netdisk"
   ) {
     driver = new Driver115(parseAddition(storageConfig))
