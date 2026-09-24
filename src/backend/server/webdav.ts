@@ -130,12 +130,17 @@ webdavRouter.all("/*", async (c) => {
           isFolder: !!it.is_dir,
           modified: it.modified || new Date().toISOString(),
         }))
-        const href =
+        const virtualHref =
           davPath === "/"
             ? "/"
             : davPath.endsWith("/")
               ? davPath
               : davPath + "/"
+        // WebDAV href values are absolute URL paths. davPathOf() strips the
+        // route prefix for storage lookup, so add it back before returning XML.
+        // Without /dav, clients follow /115/... into the SPA route and GET
+        // returns 404 even though PROPFIND/login succeeded.
+        const href = virtualHref === "/" ? "/dav/" : `/dav${virtualHref}`
         const xml = buildWebDavPropfindResponse(href, items)
         return c.body(xml, depth === "0" ? 207 : 207, {
           "Content-Type": "application/xml; charset=utf-8",
