@@ -463,10 +463,32 @@ fsRouter.post("/list", async (c) => {
 })
 
 fsRouter.post("/get", async (c) => {
+  const requestStarted = Date.now()
+  const timings: Record<string, number> = {}
+  const finishTiming = (operation: string) => {
+    const totalMs = Date.now() - requestStarted
+    const parts = Object.entries(timings).map(
+      ([name, duration]) => `${name};dur=${duration}`,
+    )
+    parts.push(`total;dur=${totalMs}`)
+    c.header("Server-Timing", parts.join(", "))
+    if (totalMs >= 500) {
+      console.info(
+        `[perf][fs_get] operation=${operation} path=${body.path || "/"} ` +
+          `${Object.entries(timings)` +
+            `.map(([name, duration]) => `${name}_ms=${duration}`)` +
+            `.join(" ")} total_ms=${totalMs}`,
+      )
+    }
+  }
+
   const body = await c.req.json().catch(() => ({}))
+  const authStarted = Date.now()
   const user = await getUserFromContext(c)
+  timings.auth = Date.now() - authStarted
   const isShare = (body.path || "/").startsWith("/@s")
   if (!isShare && (!user || user.disabled)) {
+    finishTiming("unauthorized")
     return c.json({ code: 401, message: "Unauthorized", data: null }, 401)
   }
   const requestContext = getStorageRequestContext(c)
@@ -536,7 +558,9 @@ fsRouter.post("/get", async (c) => {
     }
 
     // 普通路径：应用 meta 权限（密码 + read_users + readme/header）
+    const metaStarted = Date.now()
     const meta = await getNearestMeta(reqPath, c.env)
+    timings.meta = Date.now() - metaStarted
     if (!canAccess(user, meta, reqPath, body.password || "")) {
       return c.json(
         { code: 403, message: "Access denied (wrong password or not in read_users)", data: null },
@@ -544,7 +568,9 @@ fsRouter.post("/get", async (c) => {
       )
     }
 
+    const itemStarted = Date.now()
     const { item, provider, rawUrl } = await getItem(reqPath, requestContext)
+    timings.get_item = Date.now() - itemStarted
     // 与 /fs/list 同源逻辑，见上方注释
     const signPolicy = await getSignPolicy(c)
     const signNeeded = signPolicy.enabled || (await isEncryptPath(c, reqPath))
@@ -597,6 +623,7 @@ fsRouter.post("/get", async (c) => {
     // 对齐 Go server/handles/fsread.go getRelated 逻辑：
     //   stem = 去掉最后一个扩展名的文件名；related = 同目录中 stem 相同的其他文件
     let related: any[] = []
+    const relatedStarted = Date.now()
     if (!item.is_dir) {
       try {
         const parentPath = reqPath.includes("/")
@@ -628,6 +655,8 @@ fsRouter.post("/get", async (c) => {
         related = []
       }
     }
+    timings.related = Date.now() - relatedStarted
+    finishTiming("success")
 
     return c.json({
       code: 200,
@@ -652,6 +681,7 @@ fsRouter.post("/get", async (c) => {
       },
     })
   } catch (err: any) {
+    finishTiming("error")
     return c.json({ code: 500, message: safeErrorMessage(err), data: null })
   }
 })
