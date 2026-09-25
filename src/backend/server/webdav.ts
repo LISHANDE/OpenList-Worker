@@ -92,8 +92,31 @@ function splitPath(p: string): { dir: string; name: string } {
 }
 
 webdavRouter.all("/*", async (c) => {
+  const requestStarted = Date.now()
+  const authStarted = Date.now()
   const user = await webdavAuth(c)
+  const authMs = Date.now() - authStarted
+  const recordTiming = (operation: string, operationStarted?: number) => {
+    const operationMs =
+      operationStarted === undefined ? 0 : Date.now() - operationStarted
+    const totalMs = Date.now() - requestStarted
+    const parts = [`auth;dur=${authMs}`]
+    if (operationStarted !== undefined) {
+      parts.push(`storage;dur=${operationMs}`)
+    }
+    parts.push(`total;dur=${totalMs}`)
+    c.header("Server-Timing", parts.join(", "))
+    if (totalMs >= 500) {
+      console.info(
+        `[perf][webdav] method=${c.req.method} operation=${operation} ` +
+          `path=${new URL(c.req.url).pathname} auth_ms=${authMs} ` +
+          `storage_ms=${operationMs} total_ms=${totalMs}`,
+      )
+    }
+  }
+
   if (!user) {
+    recordTiming("unauthorized")
     return c.text("Unauthorized", 401, {
       "WWW-Authenticate": 'Basic realm="OpenList"',
     })
@@ -122,6 +145,7 @@ webdavRouter.all("/*", async (c) => {
 
       case "PROPFIND": {
         if (!canRead) return c.text("Forbidden", 403)
+        const operationStarted = Date.now()
         const depth = c.req.header("Depth") || "1"
         const res = await listItems(davPath, ctx)
         const items = (res.content || []).map((it: any) => ({
@@ -142,6 +166,7 @@ webdavRouter.all("/*", async (c) => {
         // returns 404 even though PROPFIND/login succeeded.
         const href = virtualHref === "/" ? "/dav/" : `/dav${virtualHref}`
         const xml = buildWebDavPropfindResponse(href, items)
+        recordTiming("propfind", operationStarted)
         return c.body(xml, depth === "0" ? 207 : 207, {
           "Content-Type": "application/xml; charset=utf-8",
         })
@@ -150,6 +175,7 @@ webdavRouter.all("/*", async (c) => {
       case "GET":
       case "HEAD": {
         if (!canRead) return c.text("Forbidden", 403)
+        const operationStarted = Date.now()
         const { item, rawUrl, provider } = await getItem(davPath, ctx)
         if (!item) return c.text("Not found", 404)
         if (item.is_dir) return c.text("Is a directory", 400)
@@ -172,6 +198,7 @@ webdavRouter.all("/*", async (c) => {
                 new Date(Date.now() + 10 * 60 * 1000).toUTCString(),
               )
               c.header("Vary", "Authorization, User-Agent")
+              recordTiming("direct_redirect", operationStarted)
               return c.redirect(direct.toString(), 307)
             }
           } catch {}
@@ -179,6 +206,7 @@ webdavRouter.all("/*", async (c) => {
 
         // 其他驱动仍重定向到 rawRouter；它会按存储策略处理
         // proxy/redirect/stream、Range、签名与 SSRF 防护。
+        recordTiming("raw_redirect", operationStarted)
         return c.redirect(
           rawUrl || `/api/d${encodeDownloadPath(davPath)}`,
           302,
@@ -244,6 +272,7 @@ webdavRouter.all("/*", async (c) => {
         return c.text("Method Not Allowed", 405)
     }
   } catch (e: any) {
+    recordTiming("error")
     const msg = safeErrorMessage(e)
     if (msg.includes("not found") || msg.includes("storage not found")) {
       return c.text("Not Found", 404)
