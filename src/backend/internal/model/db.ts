@@ -1068,14 +1068,18 @@ const ensureDefaultMetas = (db: any) => {
  * Trade-off worth knowing: on Workers `env` is shared across requests within
  * an isolate, so a cache hung directly on it would never expire.
  * AsyncLocalStorage would give exact per-request scope but is unavailable on
- * EdgeOne/ESA/Vercel (nodejs_compat is only declared in wrangler.toml). A 1s
+ * EdgeOne/ESA/Vercel (nodejs_compat is only declared in wrangler.toml). A short
  * TTL is the portable middle ground — worst case a concurrent isolate sees
- * config up to 1s stale, and saveDb() refreshes the cache on every write.
+ * config briefly stale, and saveDb() refreshes the cache on every write.
+ *
+ * For this serverless deployment, 15 seconds avoids reloading the entire
+ * config for every WebDAV HEAD/GET/Range burst while keeping admin changes
+ * acceptably fresh on other warm isolates.
  *
  * TODO: threading `db` down from the handler gives exact per-request scope,
  * but touches all ~83 call sites.
  */
-const DB_CACHE_TTL_MS = 1000
+const DB_CACHE_TTL_MS = 15 * 1000
 const dbCache = new WeakMap<object, { ts: number; db: any }>()
 const dbInflight = new WeakMap<object, Promise<any>>()
 
