@@ -78,7 +78,7 @@ adminRouter.post("/storage/load_all", async (c) => {
   for (const storage of db.storages || []) {
     if (storage.disabled) continue
     try {
-      await getDriver(storage.driver, storage)
+      await getDriver(storage.driver, storage, { validateCredentials: true })
       loaded++
       results.push({
         id: storage.id,
@@ -305,7 +305,9 @@ adminRouter.post("/storage/create", async (c) => {
   // 再尝试连接远程网盘（不重复 init，getDriver 内部已经 init 过）
   if (!newStorage.disabled) {
     try {
-      await getDriver(newStorage.driver, newStorage)
+      await getDriver(newStorage.driver, newStorage, {
+        validateCredentials: true,
+      })
       newStorage.status = "work"
     } catch (e: any) {
       newStorage.status = e.message || String(e)
@@ -410,6 +412,7 @@ adminRouter.post("/storage/update", async (c) => {
         // twice before the final update below.
         await getDriver(updatedStorage.driver, updatedStorage, {
           deferTokenPersistence: true,
+          validateCredentials: true,
         })
         updatedStorage.status = "work"
       } catch (e: any) {
@@ -453,7 +456,9 @@ adminRouter.post("/storage/enable", async (c) => {
     // 重新加载时会再次尝试。
     ;(async () => {
       try {
-        await getDriver(s.driver, s)
+        await getDriver(s.driver, s, {
+          validateCredentials: true,
+        })
         const db2 = await getDb(c.env)
         const st = db2.storages.find((x: any) => x.id === id)
         if (st && !st.disabled) {
