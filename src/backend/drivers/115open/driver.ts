@@ -48,6 +48,15 @@ export function normalizePan115Addition(a: any): Pan115Addition {
   return norm as Pan115Addition
 }
 
+interface Pan115GetPerf {
+  folderResolveMs: number
+  listMs: number
+  listPages: number
+  fileCacheHit: boolean
+  linkCacheHit: boolean
+  downUrlMs: number
+}
+
 export class Pan115Driver implements StorageDriver {
   private client: Pan115Client
   private addition: Pan115Addition
@@ -289,7 +298,10 @@ export class Pan115Driver implements StorageDriver {
   }
 
   /** 解析物理路径 → 文件（Go getFromParent 逻辑：列父目录匹配，拿完整 pick_code） */
-  private async resolveFile(physicalPath: string): Promise<Pan115File> {
+  private async resolveFile(
+    physicalPath: string,
+    perf?: Pan115GetPerf,
+  ): Promise<Pan115File> {
     const clean =
       "/" +
       String(physicalPath || "")
@@ -297,7 +309,10 @@ export class Pan115Driver implements StorageDriver {
         .filter(Boolean)
         .join("/")
     const cachedFile = this.fileCache.get(clean)
-    if (cachedFile && cachedFile.expire > Date.now()) return cachedFile.file
+    if (cachedFile && cachedFile.expire > Date.now()) {
+      if (perf) perf.fileCacheHit = true
+      return cachedFile.file
+    }
     if (cachedFile) this.fileCache.delete(clean)
     const segs = clean.split("/").filter(Boolean)
     const rawName = segs.pop() || ""
@@ -311,12 +326,15 @@ export class Pan115Driver implements StorageDriver {
     })()
     const parentPath = "/" + segs.join("/")
 
+    const folderResolveStarted = Date.now()
     const parentId = await this.resolveFolderId(parentPath)
+    if (perf) perf.folderResolveMs += Date.now() - folderResolveStarted
     // 分页列出父目录找文件（列表接口返回完整 pick_code；
     // folder/get_info 只支持目录路径，对文件路径不可用）
     let offset = 0
     for (;;) {
       if (!this.reserve()) throw new Error("subrequest budget exceeded")
+      const listStarted = Date.now()
       const { files, count } = await this.client.getFiles({
         cid: parentId,
         limit: Math.max(this.pageSize, 1000),
@@ -325,6 +343,10 @@ export class Pan115Driver implements StorageDriver {
         o: "file_name",
         showDir: true,
       })
+      if (perf) {
+        perf.listMs += Date.now() - listStarted
+        perf.listPages++
+      }
       for (const file of files) {
         const childPath = `${parentPath === "/" ? "" : parentPath}/${file.fn}`
         this.fileCache.set(childPath, {
@@ -380,7 +402,16 @@ export class Pan115Driver implements StorageDriver {
         raw_url: "",
       }
     }
-    const file = await this.resolveFile(physicalPath)
+    const perf: Pan115GetPerf = {
+      folderResolveMs: 0,
+      listMs: 0,
+      listPages: 0,
+      fileCacheHit: false,
+      linkCacheHit: false,
+      downUrlMs: 0,
+    }
+    const getStarted = Date.now()
+    const file = await this.resolveFile(physicalPath, perf)
     const item = pan115FileToFileItem(file)
     if (file.fc !== "0" && file.pc) {
       try {
@@ -388,11 +419,14 @@ export class Pan115Driver implements StorageDriver {
         const cacheKey = `${file.fid}|${downloadUA}`
         const cached = this.linkCache.get(cacheKey)
         if (cached && cached.expire > Date.now()) {
+          perf.linkCacheHit = true
           item.raw_url = cached.url
           item.raw_url_headers = { "User-Agent": downloadUA }
         } else {
           if (!this.reserve()) throw new Error("subrequest budget exceeded")
+          const downUrlStarted = Date.now()
           const resp = await this.client.downUrl(file.pc, downloadUA)
+          perf.downUrlMs += Date.now() - downUrlStarted
           const entry = resp[file.fid]
           if (entry?.url?.url) {
             item.raw_url = entry.url.url
@@ -413,6 +447,16 @@ export class Pan115Driver implements StorageDriver {
           console.warn(`[115open] downUrl warning for ${file.fn}:`, e.message)
         }
       }
+    }
+    const totalMs = Date.now() - getStarted
+    if (totalMs >= 500) {
+      console.info(
+        `[perf][115open_get] path=${encodeURIComponent(clean)} ` +
+          `file_cache_hit=${perf.fileCacheHit} folder_resolve_ms=${perf.folderResolveMs} ` +
+          `list_ms=${perf.listMs} list_pages=${perf.listPages} ` +
+          `link_cache_hit=${perf.linkCacheHit} downurl_ms=${perf.downUrlMs} ` +
+          `total_ms=${totalMs}`,
+      )
     }
     return item
   }
