@@ -473,11 +473,12 @@ fsRouter.post("/get", async (c) => {
     parts.push(`total;dur=${totalMs}`)
     c.header("Server-Timing", parts.join(", "))
     if (totalMs >= 500) {
+      const detail = Object.entries(timings)
+        .map(([name, duration]) => `${name}_ms=${duration}`)
+        .join(" ")
       console.info(
         `[perf][fs_get] operation=${operation} path=${body.path || "/"} ` +
-          `${Object.entries(timings)` +
-            `.map(([name, duration]) => `${name}_ms=${duration}`)` +
-            `.join(" ")} total_ms=${totalMs}`,
+          `${detail} total_ms=${totalMs}`,
       )
     }
   }
