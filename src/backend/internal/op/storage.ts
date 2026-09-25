@@ -1232,13 +1232,17 @@ export async function getDriver(
       return cached
     }
 
-    const driver = await getOrCreateDriver(driverInitCache, cacheKey, async () => {
-      const ready = driverCache.get(cacheKey)
-      if (ready) return ready
-      const created = await createDriver(driverName, storageConfig)
-      setDriverCache(cacheKey, created)
-      return created
-    })
+    const driver = await getOrCreateDriver(
+      driverInitCache,
+      cacheKey,
+      async () => {
+        const ready = driverCache.get(cacheKey)
+        if (ready) return ready
+        const created = await createDriver(driverName, storageConfig)
+        setDriverCache(cacheKey, created)
+        return created
+      },
+    )
     await validateIfRequested(driver)
     return driver
   } finally {
