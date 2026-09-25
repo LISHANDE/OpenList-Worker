@@ -147,6 +147,8 @@ export interface StorageRequestContext {
 
 export interface GetDriverOptions {
   deferTokenPersistence?: boolean
+  /** Run an explicit remote credential check (admin operations only). */
+  validateCredentials?: boolean
 }
 
 export async function getOrCreateDriver(
@@ -1197,12 +1199,24 @@ export async function getDriver(
   )
   if (deferTokenPersistence) deferredTokenPersistence.add(storageConfig)
 
+  const validateIfRequested = async (driver: StorageDriver) => {
+    if (!options.validateCredentials) return
+    const validate = (driver as StorageDriver & {
+      validateCredentials?: () => Promise<void>
+    }).validateCredentials
+    if (typeof validate === "function") {
+      await validate.call(driver)
+    }
+  }
+
   try {
     const normDriver = (driverName || "")
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "")
     if (normDriver === "local") {
-      return createDriver(driverName, storageConfig)
+      const driver = await createDriver(driverName, storageConfig)
+      await validateIfRequested(driver)
+      return driver
     }
 
     if (!storageConfig) {
@@ -1213,15 +1227,20 @@ export async function getDriver(
 
     const cacheKey = `${storageConfig.id}_${storageConfig.modified}`
     const cached = driverCache.get(cacheKey)
-    if (cached) return cached
+    if (cached) {
+      await validateIfRequested(cached)
+      return cached
+    }
 
-    return getOrCreateDriver(driverInitCache, cacheKey, async () => {
+    const driver = await getOrCreateDriver(driverInitCache, cacheKey, async () => {
       const ready = driverCache.get(cacheKey)
       if (ready) return ready
-      const driver = await createDriver(driverName, storageConfig)
-      setDriverCache(cacheKey, driver)
-      return driver
+      const created = await createDriver(driverName, storageConfig)
+      setDriverCache(cacheKey, created)
+      return created
     })
+    await validateIfRequested(driver)
+    return driver
   } finally {
     if (deferTokenPersistence) deferredTokenPersistence.delete(storageConfig)
   }
