@@ -1079,7 +1079,23 @@ const ensureDefaultMetas = (db: any) => {
  * TODO: threading `db` down from the handler gives exact per-request scope,
  * but touches all ~83 call sites.
  */
-const DB_CACHE_TTL_MS = 15 * 1000
+const DEFAULT_DB_CACHE_TTL_MS = 15 * 1000
+
+function getDbCacheTtlMs(envCtx?: any): number {
+  const raw =
+    envCtx?.DB_CACHE_TTL_MS ??
+    globalEnvCtx?.DB_CACHE_TTL_MS ??
+    (typeof process !== "undefined"
+      ? process.env?.DB_CACHE_TTL_MS
+      : undefined)
+  if (raw === undefined || raw === null || raw === "") {
+    return DEFAULT_DB_CACHE_TTL_MS
+  }
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_DB_CACHE_TTL_MS
+}
 const dbCache = new WeakMap<object, { ts: number; db: any }>()
 const dbInflight = new WeakMap<object, Promise<any>>()
 
@@ -1284,7 +1300,7 @@ export const getDb = async (envCtx?: any) => {
 
   // 2) Short-TTL memoization: sequential calls in one request reuse the result.
   const hit = dbCache.get(cacheKey)
-  if (hit && Date.now() - hit.ts < DB_CACHE_TTL_MS) return hit.db
+  if (hit && Date.now() - hit.ts < getDbCacheTtlMs(envCtx)) return hit.db
 
   const promise = loadDb(envCtx)
     .then((db) => {
