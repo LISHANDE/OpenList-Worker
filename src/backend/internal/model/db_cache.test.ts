@@ -17,7 +17,7 @@ import { test } from "node:test"
  *  3. saveDb() 之后的无参 getDb() 必须能观察到最新写入（写后读一致）；
  *  4. 有参调用与无参调用共享同一份缓存，不应各自重复加载。
  *
- * 说明：db.ts 内部使用模块级缓存（TTL 1s），因此测试之间通过
+ * 说明：db.ts 内部使用模块级短时缓存，因此测试之间通过
  * `__resetDbCacheForTest()` 清理状态，避免相互干扰。
  */
 
@@ -236,13 +236,13 @@ test("getDb: TTL 过期后允许重新加载（缓存不是永久固化）", asy
   const { backend, stats } = createCountingBackend(SAMPLE)
   __setStoreBackendLoaderForTest(async () => backend)
 
-  setEnvCtx({ DB_DRIVER: "counting" })
+  setEnvCtx({ DB_DRIVER: "counting", DB_CACHE_TTL_MS: 50 })
 
   await getDb()
   assert.equal(stats.load, 1)
 
-  // 等待 TTL（1s）过期，模拟跨请求/长时间空闲后的重新加载。
-  await new Promise((r) => setTimeout(r, 1100))
+  // 使用测试专用短 TTL，避免生产默认值（15s）拖慢测试。
+  await new Promise((r) => setTimeout(r, 80))
   await getDb()
   assert.equal(stats.load, 2, "TTL 过期后应重新 load，以获取其他实例的写入")
 })
