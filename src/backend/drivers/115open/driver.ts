@@ -87,15 +87,12 @@ export class Pan115Driver implements StorageDriver {
     this.client = new Pan115Client(this.addition, onTokenUpdate)
   }
 
-  async init(): Promise<void> {
-    const a = this.addition
-    // page_size 1~1150（Go Init 限制）
-    let ps = a.page_size || 200
-    if (ps <= 0) ps = 200
-    if (ps > 1150) ps = 1150
-    this.pageSize = ps
-
-    // 验证 token（失败即挂载失败，给出明确错误）
+  /**
+   * Explicit credential check for admin create/update/reload actions.
+   * Runtime reads skip this extra round trip: the first real 115 API request
+   * already validates the token and keeps the existing refresh-on-401 logic.
+   */
+  async validateCredentials(): Promise<void> {
     try {
       await this.client.userInfo()
     } catch (e: any) {
@@ -115,6 +112,15 @@ export class Pan115Driver implements StorageDriver {
         `115 网盘 token 验证失败：${msg}。请确认 access_token / refresh_token 有效。`,
       )
     }
+  }
+
+  async init(): Promise<void> {
+    const a = this.addition
+    // page_size 1~1150（Go Init 限制）
+    let ps = a.page_size || 200
+    if (ps <= 0) ps = 200
+    if (ps > 1150) ps = 1150
+    this.pageSize = ps
 
     // 非根目录挂载 → 计算路径前缀（Go Init parentPath）
     const rootId = this.getRootId()
