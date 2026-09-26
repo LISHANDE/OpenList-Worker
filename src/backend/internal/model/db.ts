@@ -1085,9 +1085,7 @@ function getDbCacheTtlMs(envCtx?: any): number {
   const raw =
     envCtx?.DB_CACHE_TTL_MS ??
     globalEnvCtx?.DB_CACHE_TTL_MS ??
-    (typeof process !== "undefined"
-      ? process.env?.DB_CACHE_TTL_MS
-      : undefined)
+    (typeof process !== "undefined" ? process.env?.DB_CACHE_TTL_MS : undefined)
   if (raw === undefined || raw === null || raw === "") {
     return DEFAULT_DB_CACHE_TTL_MS
   }
@@ -1098,6 +1096,7 @@ function getDbCacheTtlMs(envCtx?: any): number {
 }
 const dbCache = new WeakMap<object, { ts: number; db: any }>()
 const dbInflight = new WeakMap<object, Promise<any>>()
+const dbFreshInflight = new WeakMap<object, Promise<any>>()
 
 /**
  * 存储后端解析入口。默认直接委托给 store/backend 的 getStoreBackend；
@@ -1120,6 +1119,7 @@ export const __resetDbCacheForTest = () => {
   if (globalEnvCtx && typeof globalEnvCtx === "object") {
     dbCache.delete(globalEnvCtx)
     dbInflight.delete(globalEnvCtx)
+    dbFreshInflight.delete(globalEnvCtx)
   }
   globalEnvCtx = null
   memoryDb = null
@@ -1311,6 +1311,53 @@ export const getDb = async (envCtx?: any) => {
       dbInflight.delete(cacheKey)
     })
   dbInflight.set(cacheKey, promise)
+  return promise
+}
+
+/**
+ * Read the latest persisted database, bypassing the short request cache.
+ *
+ * OAuth refresh-token rotation is a correctness boundary: a 15-second cached
+ * snapshot can contain the previous one-time token and must never be used to
+ * decide which token is current or to persist its replacement.
+ */
+export const getDbFresh = async (envCtx?: any) => {
+  if (envCtx) globalEnvCtx = envCtx
+  const cacheKey = envCtx || resolveNoArgKey()
+  if (!cacheKey) return loadDb(envCtx)
+
+  const existing = dbFreshInflight.get(cacheKey)
+  if (existing) return existing
+
+  const promise = (async () => {
+    // Let an older normal load finish first; otherwise its completion could
+    // overwrite the cache after this fresh read with the stale snapshot.
+    const pending = dbInflight.get(cacheKey)
+    if (pending) {
+      try {
+        await pending
+      } catch {
+        // A fresh backend read below is still worth attempting.
+      }
+    }
+
+    dbCache.delete(cacheKey)
+    const loadPromise = loadDb(envCtx).then((db) => {
+      dbCache.set(cacheKey, { ts: Date.now(), db })
+      return db
+    })
+    dbInflight.set(cacheKey, loadPromise)
+    try {
+      return await loadPromise
+    } finally {
+      if (dbInflight.get(cacheKey) === loadPromise) {
+        dbInflight.delete(cacheKey)
+      }
+    }
+  })().finally(() => {
+    dbFreshInflight.delete(cacheKey)
+  })
+  dbFreshInflight.set(cacheKey, promise)
   return promise
 }
 
@@ -2004,7 +2051,11 @@ async function unsealDb(
       const sealedValue = target.otp_secret
       const identity = `users:${u.id ?? i}:otp_secret`
       tasks.push(async () => {
-        target.otp_secret = await unsealValue(sealedValue, fieldCipher, identity)
+        target.otp_secret = await unsealValue(
+          sealedValue,
+          fieldCipher,
+          identity,
+        )
       })
     }
     // 密码解密
@@ -2019,7 +2070,9 @@ async function unsealDb(
   }
 
   for (let i = 0; i < tasks.length; i += UNSEAL_CONCURRENCY) {
-    await Promise.all(tasks.slice(i, i + UNSEAL_CONCURRENCY).map((run) => run()))
+    await Promise.all(
+      tasks.slice(i, i + UNSEAL_CONCURRENCY).map((run) => run()),
+    )
   }
 }
 
@@ -2094,7 +2147,8 @@ export const saveDb = async (
     console.log(
       `[DB] saveDb: cipher=${cipher}, persisting to ${backend.name}, storages=${data.storages?.length || 0}`,
     )
-    const fieldCipher = cipher === "none" ? null : await resolveFieldCipher(activeEnv)
+    const fieldCipher =
+      cipher === "none" ? null : await resolveFieldCipher(activeEnv)
     if (cipher !== "none" && !fieldCipher && !sealKeyMissingWarned) {
       // 只在首次告警：密钥缺失会持续到密钥可用为止，逐次写入都打印只会刷屏。
       sealKeyMissingWarned = true

@@ -207,10 +207,7 @@ webdavRouter.all("/*", async (c) => {
         // 其他驱动仍重定向到 rawRouter；它会按存储策略处理
         // proxy/redirect/stream、Range、签名与 SSRF 防护。
         recordTiming("raw_redirect", operationStarted)
-        return c.redirect(
-          rawUrl || `/api/d${encodeDownloadPath(davPath)}`,
-          302,
-        )
+        return c.redirect(rawUrl || `/api/d${encodeDownloadPath(davPath)}`, 302)
       }
 
       case "PUT": {
@@ -276,6 +273,14 @@ webdavRouter.all("/*", async (c) => {
     const msg = safeErrorMessage(e)
     if (msg.includes("not found") || msg.includes("storage not found")) {
       return c.text("Not Found", 404)
+    }
+    // 115 API code 405 is an upstream rate-control signal, not an unsupported
+    // WebDAV method. Return 429 so scanners back off instead of treating the
+    // mount as permanently broken. The global circuit breaker supplies the
+    // cooldown for subsequent requests.
+    if (Number(e?.code) === 405 || Number(e?.code) === 429) {
+      const retryAfter = Math.max(1, Number(e?.retryAfter) || 60)
+      return c.text(msg, 429, { "Retry-After": String(retryAfter) })
     }
     return c.text(msg, 500)
   }

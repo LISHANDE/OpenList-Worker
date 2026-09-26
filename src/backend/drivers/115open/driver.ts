@@ -10,7 +10,11 @@ import {
 import { sortFileItems } from "../../internal/driver/sort"
 import { sha1, hmacSha1Base64 } from "../../pkg/crypto"
 import { Pan115Addition, Pan115File } from "./types"
-import { Pan115Client, ERR_OBJECT_NOT_FOUND } from "./util"
+import {
+  Pan115Client,
+  ERR_OBJECT_NOT_FOUND,
+  type Pan115ClientHooks,
+} from "./util"
 
 /** OpenList Go base.UserAgent（与 Go 驱动一致，115 防盗链校验通过率高） */
 const OPENLIST_UA =
@@ -66,15 +70,14 @@ export class Pan115Driver implements StorageDriver {
   /** cache: 物理路径 → fid（复用） */
   private fidCache = new Map<string, string>()
   /** 浏览目录时顺便缓存文件元数据，避免点击播放后再次列父目录。 */
-  private fileCache = new Map<
-    string,
-    { file: Pan115File; expire: number }
-  >()
+  private fileCache = new Map<string, { file: Pan115File; expire: number }>()
   /** 短时目录缓存：同一预览请求获取 related 时不再重复调用 115。 */
   private dirListCache = new Map<
     string,
     { files: Pan115File[]; expire: number }
   >()
+  /** 同一实例内合并并发目录请求，避免扫描器重复 PROPFIND 穿透缓存。 */
+  private dirListInflight = new Map<string, Promise<Pan115File[]>>()
   private static readonly META_TTL_MS = 5 * 60 * 1000
   /** CF subrequest 预算 */
   private budget = { used: 0, limit: SUBREQUEST_LIMIT }
@@ -85,15 +88,9 @@ export class Pan115Driver implements StorageDriver {
   private linkCache = new Map<string, { url: string; expire: number }>()
   private static readonly LINK_TTL_MS = 30 * 60 * 1000
 
-  constructor(
-    addition: Pan115Addition,
-    onTokenUpdate?: (tokens: {
-      access_token: string
-      refresh_token: string
-    }) => void,
-  ) {
+  constructor(addition: Pan115Addition, hooks: Pan115ClientHooks = {}) {
     this.addition = normalizePan115Addition(addition)
-    this.client = new Pan115Client(this.addition, onTokenUpdate)
+    this.client = new Pan115Client(this.addition, hooks)
   }
 
   /**
@@ -181,6 +178,33 @@ export class Pan115Driver implements StorageDriver {
       )
     }
 
+    const existing = this.dirListInflight.get(clean)
+    if (existing) {
+      const files = await existing
+      return sortFileItems(
+        files.map(pan115FileToFileItem),
+        this.addition.order_by || "file_name",
+        this.addition.order_direction,
+      )
+    }
+
+    const pending = this.loadDirectory(clean)
+    this.dirListInflight.set(clean, pending)
+    try {
+      const files = await pending
+      return sortFileItems(
+        files.map(pan115FileToFileItem),
+        this.addition.order_by || "file_name",
+        this.addition.order_direction,
+      )
+    } finally {
+      if (this.dirListInflight.get(clean) === pending) {
+        this.dirListInflight.delete(clean)
+      }
+    }
+  }
+
+  private async loadDirectory(clean: string): Promise<Pan115File[]> {
     const cid = await this.resolveFolderId(clean)
     const filesAll: Pan115File[] = []
     let offset = 0
@@ -217,11 +241,7 @@ export class Pan115Driver implements StorageDriver {
         expire: Date.now() + Pan115Driver.META_TTL_MS,
       })
     }
-    return sortFileItems(
-      filesAll.map(pan115FileToFileItem),
-      this.addition.order_by || "file_name",
-      this.addition.order_direction,
-    )
+    return filesAll
   }
 
   /** 解析物理路径 → 文件夹 fid（逐层 getFolderInfoByPath，带缓存） */
