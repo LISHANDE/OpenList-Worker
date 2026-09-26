@@ -196,6 +196,40 @@ test("refresh lease and circuit breaker are shared across instances", async () =
   )
 })
 
+test("115 access ceiling opens a shared circuit without retrying the API", async () => {
+  const store = new FakeBlobStore()
+  __setPan115CoordinatorStoreForTest(store)
+  const first = new Pan115GlobalCoordinator("storage-access-limit", 5)
+  const second = new Pan115GlobalCoordinator("storage-access-limit", 5)
+  let requests = 0
+  globalThis.fetch = (async () => {
+    requests++
+    return jsonResponse({
+      state: false,
+      code: 770004,
+      message: "已达到当前访问上限，请稍后再试",
+    })
+  }) as typeof fetch
+
+  const client = new Pan115Client(
+    { access_token: "access", refresh_token: "refresh" },
+    {
+      beforeRequest: () => first.beforeRequest(),
+      reportApiError: (code) => first.reportApiError(code),
+    },
+  )
+  await assert.rejects(
+    () => client.userInfo(),
+    (error: any) => error?.code === 770004,
+  )
+  assert.equal(requests, 1)
+  await assert.rejects(
+    () => second.beforeRequest(),
+    (error: any) => error?.code === 770004 && error?.retryAfter > 0,
+  )
+  assert.equal(requests, 1)
+})
+
 test("refresh lease remains exclusive across a time-slot boundary", async () => {
   const store = new FakeBlobStore()
   __setPan115CoordinatorStoreForTest(store)

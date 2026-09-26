@@ -286,7 +286,7 @@ export class Pan115Client {
     if (state === false || state === undefined) {
       const code = Number(body?.code ?? 0)
       const reportRateControl = (errorCode: number) => {
-        if (errorCode === 405 || errorCode === 429) {
+        if (errorCode === 405 || errorCode === 429 || errorCode === 770004) {
           // Only log the endpoint path: query, tokens and response body may
           // contain credentials or private file information.
           console.warn(

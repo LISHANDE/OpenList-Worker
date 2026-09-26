@@ -23,6 +23,9 @@ type BlobStoreLike = {
 
 const STORE_NAME = "openlist_db"
 const CIRCUIT_BREAKER_MS = 10 * 60 * 1000
+// 770004 is an upstream access ceiling. Its reset time is not documented;
+// use a longer quiet period to avoid repeated scans consuming more requests.
+const ACCESS_LIMIT_BREAKER_MS = 30 * 60 * 1000
 const REFRESH_LEASE_MS = 30 * 1000
 const MAX_RATE_WAIT_MS = 8 * 1000
 
@@ -96,6 +99,7 @@ export class Pan115GlobalCoordinator {
   private readonly storageKey: string
   private readonly rate: number
   private localCircuitUntil = 0
+  private localCircuitCode = 405
 
   constructor(storageKey: string, rate: number) {
     this.storageKey = safeKeyPart(storageKey)
@@ -106,12 +110,12 @@ export class Pan115GlobalCoordinator {
     return `openlist_115_circuit_${this.storageKey}`
   }
 
-  private throwCircuitOpen(until: number): never {
+  private throwCircuitOpen(until: number, code: number): never {
     const waitSeconds = Math.max(1, Math.ceil((until - Date.now()) / 1000))
     const error: any = new Error(
       `115 网盘已因上游限流进入保护期，请约 ${waitSeconds} 秒后再试`,
     )
-    error.code = 405
+    error.code = code
     error.retryAfter = waitSeconds
     throw error
   }
@@ -120,7 +124,7 @@ export class Pan115GlobalCoordinator {
     store: BlobStoreLike | null,
   ): Promise<void> {
     if (this.localCircuitUntil > Date.now()) {
-      this.throwCircuitOpen(this.localCircuitUntil)
+      this.throwCircuitOpen(this.localCircuitUntil, this.localCircuitCode)
     }
     if (!store) return
     try {
@@ -130,10 +134,11 @@ export class Pan115GlobalCoordinator {
       const until = Number(parsed?.until || 0)
       if (until > Date.now()) {
         this.localCircuitUntil = until
-        this.throwCircuitOpen(until)
+        this.localCircuitCode = Number(parsed?.code || 405)
+        this.throwCircuitOpen(until, this.localCircuitCode)
       }
     } catch (error: any) {
-      if (Number(error?.code) === 405) throw error
+      if (Number(error?.retryAfter) > 0) throw error
       console.warn(
         `[115open] failed to read circuit state: ${error?.message || error}`,
       )
@@ -214,9 +219,11 @@ export class Pan115GlobalCoordinator {
   }
 
   async reportApiError(code: number): Promise<void> {
-    if (code !== 405 && code !== 429) return
-    const until = Date.now() + CIRCUIT_BREAKER_MS
+    if (code !== 405 && code !== 429 && code !== 770004) return
+    const until = Date.now() +
+      (code === 770004 ? ACCESS_LIMIT_BREAKER_MS : CIRCUIT_BREAKER_MS)
     this.localCircuitUntil = until
+    this.localCircuitCode = code
     const store = await getCoordinationStore()
     if (!store) return
     try {
