@@ -68,6 +68,27 @@ test("reuses a warm-isolate directory listing for the same storage scope", async
   assert.equal(result[0]?.name, "JAV")
 })
 
+test("reuses a listed child folder id across WebDAV driver instances", async () => {
+  const first = new Pan115Driver(addition, {}, "shared-child-folder-id")
+  ;(first as any).client = { getFiles: async () => rootListing }
+  await first.list("/", "/")
+
+  const second = new Pan115Driver(addition, {}, "shared-child-folder-id")
+  let childListings = 0
+  ;(second as any).client = {
+    getFolderInfoByPath: async () => {
+      throw new Error("a listed child must not be resolved a second time")
+    },
+    getFiles: async (opts: { cid: string }) => {
+      assert.equal(opts.cid, "folder-jav")
+      childListings++
+      return { files: [], count: 0 }
+    },
+  }
+  await second.list("/JAV", "/JAV")
+  assert.equal(childListings, 1)
+})
+
 test("initializing a non-root mount does not make a redundant API request", async () => {
   const driver = new Pan115Driver(
     { ...addition, root_id: "folder-jav" },

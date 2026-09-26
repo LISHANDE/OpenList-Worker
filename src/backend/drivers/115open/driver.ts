@@ -288,6 +288,19 @@ export class Pan115Driver implements StorageDriver {
     const cached = this.fidCache.get(clean)
     if (cached) return cached
 
+    // Listing the parent already gave us the child folder's id. Drivers are
+    // recreated for each WebDAV request, so reuse that warm-isolate metadata
+    // instead of asking 115 to resolve the same child path again.
+    const listedFolder = this.fileCache.get(clean)
+    if (
+      listedFolder &&
+      listedFolder.expire > Date.now() &&
+      listedFolder.file.fc === "0"
+    ) {
+      this.fidCache.set(clean, listedFolder.file.fid)
+      return listedFolder.file.fid
+    }
+
     // 用 GetFolderInfoByPath 一次性解析（Go Get 逻辑）
     const fullPath = rootId === "0" ? clean : `/${rootId}${clean}`
     try {

@@ -285,6 +285,15 @@ export class Pan115Client {
     const state = body?.state
     if (state === false || state === undefined) {
       const code = Number(body?.code ?? 0)
+      const reportRateControl = (errorCode: number) => {
+        if (errorCode === 405 || errorCode === 429) {
+          // Only log the endpoint path: query, tokens and response body may
+          // contain credentials or private file information.
+          console.warn(
+            `[115open] upstream rate control code=${errorCode} endpoint=${new URL(url).pathname}`,
+          )
+        }
+      }
       if (isAuthError(code) && !skipAuthRetry) {
         // token 失效 → 刷新一次并重试（防递归：skipAuthRetry=true 时不再刷新）
         await this.refreshToken()
@@ -299,6 +308,7 @@ export class Pan115Client {
           `115 网盘 API 错误（code ${body?.code} ${body?.message}）`,
         )
         err.code = Number(body?.code ?? 0)
+        reportRateControl(err.code)
         await this.hooks.reportApiError?.(err.code)
         throw err
       }
@@ -312,6 +322,7 @@ export class Pan115Client {
         `115 网盘 API 错误（code ${code} ${body?.message || ""}）`,
       )
       err.code = code
+      reportRateControl(code)
       await this.hooks.reportApiError?.(code)
       throw err
     }

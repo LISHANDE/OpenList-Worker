@@ -9,7 +9,7 @@ export interface Pan115Addition {
   order_direction?: string
   /** 所有 API 请求限速 ([limit]r/1s)，0 表示不限 */
   limit_rate?: number
-  /** 列表分页大小（1~1150，默认 200） */
+  /** 列表分页大小（1~1150，默认 1000） */
   page_size?: number
   /** 访问令牌（必填） */
   access_token?: string
