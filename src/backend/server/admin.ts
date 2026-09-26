@@ -1380,16 +1380,16 @@ const driverConfigs: Record<string, any> = {
       {
         name: "page_size",
         type: "number",
-        default: "200",
+        default: "1000",
         required: false,
-        help: "list api per page size (1~1150)",
+        help: "list api per page size (1~1150)，建议 1000，可减少大目录分页请求",
       },
       {
         name: "limit_rate",
         type: "float",
-        default: "1",
+        default: "5",
         required: false,
-        help: "limit all api request rate ([limit]r/1s)，0 表示不限速",
+        help: "limit all api request rate ([limit]r/1s)，建议 5；低于 1 会导致 WebDAV 扫描长时间等待，0 表示不限速",
       },
     ],
     config: {

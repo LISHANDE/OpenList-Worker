@@ -69,7 +69,11 @@ export class Pan115Client {
     this.accessToken = addition.access_token || ""
     this.refreshTokenValue = addition.refresh_token || ""
     this.hooks = hooks
-    const rate = addition.limit_rate || 0
+    // storage.ts installs a cross-instance limiter through beforeRequest.
+    // Applying the per-client limiter as well would make every follow-up API
+    // request wait twice (especially painful for low rates such as 0.2 r/s).
+    // Keep the local limiter only for standalone callers without that hook.
+    const rate = hooks.beforeRequest ? 0 : addition.limit_rate || 0
     if (rate > 0) this.rateLimitMs = 1000 / rate
   }
 

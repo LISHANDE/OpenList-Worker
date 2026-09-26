@@ -72,6 +72,19 @@ test("local rate limiter serializes concurrent callers", async () => {
   assert.ok(starts[2] - starts[1] >= 15)
 })
 
+test("cross-instance limiter hook replaces the per-client limiter", () => {
+  const client = new Pan115Client(
+    {
+      access_token: "access",
+      refresh_token: "refresh",
+      limit_rate: 0.2,
+    },
+    { beforeRequest: async () => {} },
+  )
+
+  assert.equal((client as any).rateLimitMs, 0)
+})
+
 test("concurrent auth failures share one refresh and await token persistence", async () => {
   let refreshCalls = 0
   let persisted = false

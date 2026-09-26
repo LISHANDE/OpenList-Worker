@@ -44,7 +44,7 @@ export function normalizePan115Addition(a: any): Pan115Addition {
   const norm = { ...(a || {}) } as any
   norm.order_by = norm.order_by || "file_name"
   norm.order_direction = norm.order_direction || "asc"
-  norm.page_size = norm.page_size || 200
+  norm.page_size = norm.page_size || 1000
   // 兼容 OpenList Go 原版字段名（root_folder_id → root_id）
   if ((norm.root_folder_id || norm.root_folder_id === "0") && !norm.root_id) {
     norm.root_id = String(norm.root_folder_id)
@@ -77,15 +77,13 @@ function errorCode(error: unknown): number {
 export class Pan115Driver implements StorageDriver {
   private client: Pan115Client
   private addition: Pan115Addition
-  private pageSize = 200
+  private pageSize = 1000
   /**
    * Drivers are recreated for each OpenList request, while an EdgeOne function
    * isolate is often kept warm. Keep the short-lived read caches at isolate
    * scope so a media scanner's repeated PROPFINDs do not re-query 115.
    */
   private static runtimeCaches = new Map<string, Pan115RuntimeCache>()
-  /** root 非默认时，路径前缀（Go Init 计算 parentPath） */
-  private parentPath = "/"
   /** cache: 物理路径 → fid（复用） */
   private fidCache = new Map<string, string>()
   /** 浏览目录时顺便缓存文件元数据，避免点击播放后再次列父目录。 */
@@ -172,27 +170,10 @@ export class Pan115Driver implements StorageDriver {
   async init(): Promise<void> {
     const a = this.addition
     // page_size 1~1150（Go Init 限制）
-    let ps = a.page_size || 200
-    if (ps <= 0) ps = 200
+    let ps = a.page_size || 1000
+    if (ps <= 0) ps = 1000
     if (ps > 1150) ps = 1150
     this.pageSize = ps
-
-    // 非根目录挂载 → 计算路径前缀（Go Init parentPath）
-    const rootId = this.getRootId()
-    if (rootId !== "0") {
-      try {
-        const info = await this.client.getFolderInfo(rootId)
-        if (info.file_id !== "0") {
-          this.parentPath = `/${info.file_name}`
-          const paths = [...(info.paths || [])].reverse()
-          for (const p of paths) {
-            this.parentPath = `/${p.file_name}${this.parentPath}`
-          }
-        }
-      } catch (e: any) {
-        console.warn("[115open] init root path resolve failed:", e.message)
-      }
-    }
   }
 
   private getRootId(): string {

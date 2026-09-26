@@ -67,3 +67,37 @@ test("reuses a warm-isolate directory listing for the same storage scope", async
   assert.equal(calls, 1)
   assert.equal(result[0]?.name, "JAV")
 })
+
+test("initializing a non-root mount does not make a redundant API request", async () => {
+  const driver = new Pan115Driver(
+    { ...addition, root_id: "folder-jav" },
+    {},
+    "init-without-root-lookup",
+  )
+  ;(driver as any).client = {
+    getFolderInfo: async () => {
+      throw new Error("init must not resolve an unused root path")
+    },
+  }
+
+  await driver.init()
+})
+
+test("uses a 1000-item default page to avoid extra directory requests", async () => {
+  const driver = new Pan115Driver(
+    { access_token: "access", refresh_token: "refresh", root_id: "0" },
+    {},
+    "default-page-size",
+  )
+  let requestedLimit = 0
+  ;(driver as any).client = {
+    getFiles: async (opts: { limit: number }) => {
+      requestedLimit = opts.limit
+      return rootListing
+    },
+  }
+
+  await driver.init()
+  await driver.list("/", "/")
+  assert.equal(requestedLimit, 1000)
+})
