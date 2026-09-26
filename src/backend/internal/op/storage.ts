@@ -1,4 +1,10 @@
-import { resolvePath, getDb, getSettings, saveDb } from "../model/db"
+import {
+  resolvePath,
+  getDb,
+  getDbFresh,
+  getSettings,
+  saveDb,
+} from "../model/db"
 import { encodeDownloadPath } from "../../pkg/path"
 import { canUseProxyEndpoint, normalizeExtList } from "../driver/proxy"
 import { FileItem, StorageDriver, calcFileType } from "../driver/base"
@@ -38,6 +44,8 @@ import {
 } from "../../drivers/baidu_netdisk/driver"
 import { DriverBaiduPhoto } from "../../drivers/baidu_photo/driver"
 import { Pan115Driver } from "../../drivers/115open/driver"
+import { Pan115GlobalCoordinator } from "../../drivers/115open/coordinator"
+import type { Pan115TokenPair } from "../../drivers/115open/util"
 import { GithubDriver } from "../../drivers/github/driver"
 import {
   ThunderDriver,
@@ -582,25 +590,72 @@ async function createDriver(
     normDriver.startsWith("115")
   ) {
     const addition = parseAddition(storageConfig)
-    driver = new Pan115Driver(addition, async (tokens) => {
-      // 持久化刷新后的 access_token / refresh_token，避免冷启动重复刷新
-      try {
-        const db = await getDb()
-        const st = (db.storages || []).find(
-          (s: any) => s.id === storageConfig?.id,
-        )
-        if (!st) return
-        const stAddition =
-          typeof st.addition === "string"
-            ? JSON.parse(st.addition || "{}")
-            : st.addition || {}
-        stAddition.access_token = tokens.access_token
-        stAddition.refresh_token = tokens.refresh_token
-        st.addition = JSON.stringify(stAddition)
-        await saveDb(db)
-      } catch (e) {
-        console.warn("[115open] failed to persist token:", e)
+    const storageId = String(
+      storageConfig?.id || storageConfig?.mount_path || "default",
+    )
+    const coordinator = new Pan115GlobalCoordinator(
+      storageId,
+      Number(addition.limit_rate || 0),
+    )
+    const readLatestTokens = async (): Promise<Pan115TokenPair | null> => {
+      const db = await getDbFresh()
+      const st = (db.storages || []).find(
+        (s: any) => String(s.id) === String(storageConfig?.id),
+      )
+      if (!st) return null
+      const latest =
+        typeof st.addition === "string"
+          ? JSON.parse(st.addition || "{}")
+          : st.addition || {}
+      if (!latest.access_token || !latest.refresh_token) return null
+      return {
+        access_token: String(latest.access_token),
+        refresh_token: String(latest.refresh_token),
       }
+    }
+    driver = new Pan115Driver(addition, {
+      beforeRequest: () => coordinator.beforeRequest(),
+      reportApiError: (code) => coordinator.reportApiError(code),
+      tryAcquireRefreshLease: () => coordinator.tryAcquireRefreshLease(),
+      syncLatestTokens: () => readLatestTokens(),
+      onTokenUpdate: async (tokens) => {
+        // 持久化刷新后的 access_token / refresh_token，避免冷启动重复刷新
+        let lastError: unknown
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            // Refresh tokens are one-time values. Bypass the 15-second DB cache
+            // so an old request snapshot cannot overwrite a token rotated by
+            // another function instance.
+            const db = await getDbFresh()
+            const st = (db.storages || []).find(
+              (s: any) => String(s.id) === String(storageConfig?.id),
+            )
+            if (!st) {
+              throw new Error("115 storage disappeared during token refresh")
+            }
+            const stAddition =
+              typeof st.addition === "string"
+                ? JSON.parse(st.addition || "{}")
+                : st.addition || {}
+            stAddition.access_token = tokens.access_token
+            stAddition.refresh_token = tokens.refresh_token
+            st.addition = JSON.stringify(stAddition)
+            const saved = await saveDb(db)
+            if (!saved) throw new Error("115 token persistence was rejected")
+            storageConfig.addition = st.addition
+            return
+          } catch (error) {
+            lastError = error
+            if (attempt < 2) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, 100 * (attempt + 1)),
+              )
+            }
+          }
+        }
+        console.warn("[115open] failed to persist token:", lastError)
+        throw lastError
+      },
     })
     await driver.init?.()
   } else if (
@@ -1158,25 +1213,28 @@ async function createDriver(
     await driver.init?.()
   } else if (normDriver === "guangyapan" || normDriver === "guangya") {
     const addition = parseAddition(storageConfig)
-    driver = new GuangYaPanDriver(addition, async (accessToken, refreshToken) => {
-      try {
-        const db = await getDb()
-        const st = (db.storages || []).find(
-          (s: any) => s.id === storageConfig?.id,
-        )
-        if (!st) return
-        const stAddition =
-          typeof st.addition === "string"
-            ? JSON.parse(st.addition || "{}")
-            : st.addition || {}
-        stAddition.access_token = accessToken
-        if (refreshToken) stAddition.refresh_token = refreshToken
-        st.addition = JSON.stringify(stAddition)
-        await saveDb(db)
-      } catch (e) {
-        console.warn("[GuangYaPan] failed to persist tokens:", e)
-      }
-    })
+    driver = new GuangYaPanDriver(
+      addition,
+      async (accessToken, refreshToken) => {
+        try {
+          const db = await getDb()
+          const st = (db.storages || []).find(
+            (s: any) => s.id === storageConfig?.id,
+          )
+          if (!st) return
+          const stAddition =
+            typeof st.addition === "string"
+              ? JSON.parse(st.addition || "{}")
+              : st.addition || {}
+          stAddition.access_token = accessToken
+          if (refreshToken) stAddition.refresh_token = refreshToken
+          st.addition = JSON.stringify(stAddition)
+          await saveDb(db)
+        } catch (e) {
+          console.warn("[GuangYaPan] failed to persist tokens:", e)
+        }
+      },
+    )
     await driver.init?.()
   } else {
     throw new Error(
@@ -1194,16 +1252,18 @@ export async function getDriver(
 ): Promise<StorageDriver> {
   const deferTokenPersistence = Boolean(
     options.deferTokenPersistence &&
-      storageConfig &&
-      typeof storageConfig === "object",
+    storageConfig &&
+    typeof storageConfig === "object",
   )
   if (deferTokenPersistence) deferredTokenPersistence.add(storageConfig)
 
   const validateIfRequested = async (driver: StorageDriver) => {
     if (!options.validateCredentials) return
-    const validate = (driver as StorageDriver & {
-      validateCredentials?: () => Promise<void>
-    }).validateCredentials
+    const validate = (
+      driver as StorageDriver & {
+        validateCredentials?: () => Promise<void>
+      }
+    ).validateCredentials
     if (typeof validate === "function") {
       await validate.call(driver)
     }
@@ -1379,27 +1439,32 @@ export async function listItems(
       }
       if (resolved.storage.status !== "work") {
         resolved.storage.status = "work"
-        const db = await getDb(requestContext?.env)
-        const st = (db.storages || []).find(
-          (s: any) => s.id === resolved.storage?.id,
-        )
-        if (st) {
-          st.status = "work"
-          await saveDb(db, requestContext?.env)
+        if (!isPan115OpenDriver(driverName)) {
+          const db = await getDb(requestContext?.env)
+          const st = (db.storages || []).find(
+            (s: any) => s.id === resolved.storage?.id,
+          )
+          if (st) {
+            st.status = "work"
+            await saveDb(db, requestContext?.env)
+          }
         }
       }
     } catch (e: any) {
-      try {
-        const db = await getDb(requestContext?.env)
-        const st = (db.storages || []).find(
-          (s: any) => s.id === resolved.storage?.id,
-        )
-        if (st) {
-          st.status = e.message || String(e)
-          await saveDb(db, requestContext?.env)
+      resolved.storage.status = e.message || String(e)
+      if (!isPan115OpenDriver(driverName)) {
+        try {
+          const db = await getDb(requestContext?.env)
+          const st = (db.storages || []).find(
+            (s: any) => s.id === resolved.storage?.id,
+          )
+          if (st) {
+            st.status = e.message || String(e)
+            await saveDb(db, requestContext?.env)
+          }
+        } catch (persistErr) {
+          console.warn("Failed to persist storage status:", persistErr)
         }
-      } catch (persistErr) {
-        console.warn("Failed to persist storage status:", persistErr)
       }
       throw e
     }
@@ -1453,6 +1518,13 @@ export async function listItems(
   })
 
   return { content: items, provider: driverName, storage: resolved.storage }
+}
+
+function isPan115OpenDriver(driverName: string): boolean {
+  const normalized = String(driverName || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+  return normalized === "115open" || normalized === "115pan"
 }
 
 /**

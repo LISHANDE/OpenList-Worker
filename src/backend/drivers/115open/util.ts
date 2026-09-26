@@ -38,41 +38,57 @@ function isAuthError(code: number): boolean {
 /** SDK Error Code 430004 = 对象不存在 */
 export const ERR_OBJECT_NOT_FOUND = 430004
 
+export interface Pan115TokenPair {
+  access_token: string
+  refresh_token: string
+}
+
+export interface Pan115ClientHooks {
+  onTokenUpdate?: (tokens: Pan115TokenPair) => void | Promise<void>
+  beforeRequest?: () => void | Promise<void>
+  reportApiError?: (code: number) => void | Promise<void>
+  syncLatestTokens?: (
+    current: Pan115TokenPair,
+  ) => Pan115TokenPair | null | Promise<Pan115TokenPair | null>
+  tryAcquireRefreshLease?: () => boolean | Promise<boolean>
+}
+
 export class Pan115Client {
   private addition: Pan115Addition
   public accessToken = ""
   public refreshTokenValue = ""
-  private onTokenUpdate?: (tokens: {
-    access_token: string
-    refresh_token: string
-  }) => void
+  private hooks: Pan115ClientHooks
   /** 简单限流：每秒最多 N 个请求（Go rate.Limiter 等价） */
   private rateLimitMs = 0
   private lastRequestAt = 0
+  private rateQueue: Promise<void> = Promise.resolve()
+  private refreshInFlight: Promise<void> | null = null
 
-  constructor(
-    addition: Pan115Addition,
-    onTokenUpdate?: (tokens: {
-      access_token: string
-      refresh_token: string
-    }) => void,
-  ) {
+  constructor(addition: Pan115Addition, hooks: Pan115ClientHooks = {}) {
     this.addition = addition
     this.accessToken = addition.access_token || ""
     this.refreshTokenValue = addition.refresh_token || ""
-    this.onTokenUpdate = onTokenUpdate
+    this.hooks = hooks
     const rate = addition.limit_rate || 0
     if (rate > 0) this.rateLimitMs = 1000 / rate
   }
 
   private async waitRateLimit(): Promise<void> {
-    if (this.rateLimitMs <= 0) return
-    const now = Date.now()
-    const wait = this.lastRequestAt + this.rateLimitMs - now
-    if (wait > 0) {
-      await new Promise((r) => setTimeout(r, wait))
-    }
-    this.lastRequestAt = Date.now()
+    const scheduled = this.rateQueue
+      .catch(() => {})
+      .then(async () => {
+        if (this.rateLimitMs > 0) {
+          const now = Date.now()
+          const wait = this.lastRequestAt + this.rateLimitMs - now
+          if (wait > 0) {
+            await new Promise((r) => setTimeout(r, wait))
+          }
+          this.lastRequestAt = Date.now()
+        }
+        await this.hooks.beforeRequest?.()
+      })
+    this.rateQueue = scheduled
+    await scheduled
   }
 
   /** fetch + 20s 超时 + 网络错误重试 3 次（瞬时故障恢复） */
@@ -94,6 +110,7 @@ export class Pan115Client {
         lastErr = e
         if (attempt < 2) {
           await new Promise((r) => setTimeout(r, 500 * (attempt + 1)))
+          await this.waitRateLimit()
         }
       }
     }
@@ -112,10 +129,53 @@ export class Pan115Client {
 
   // ---- Token refresh ----
 
-  public async refreshToken(): Promise<void> {
+  private adoptTokens(tokens: Pan115TokenPair): void {
+    this.accessToken = tokens.access_token
+    this.refreshTokenValue = tokens.refresh_token
+    this.addition.access_token = tokens.access_token
+    this.addition.refresh_token = tokens.refresh_token
+  }
+
+  private async loadRotatedTokens(original: Pan115TokenPair): Promise<boolean> {
+    const latest = await this.hooks.syncLatestTokens?.(original)
+    if (!latest?.access_token || !latest?.refresh_token) return false
+    if (
+      latest.access_token === original.access_token &&
+      latest.refresh_token === original.refresh_token
+    ) {
+      return false
+    }
+    this.adoptTokens(latest)
+    return true
+  }
+
+  private async performRefreshToken(): Promise<void> {
     if (!this.refreshTokenValue) {
       throw new Error("115 网盘缺少 refresh_token（必填）")
     }
+    const original: Pan115TokenPair = {
+      access_token: this.accessToken,
+      refresh_token: this.refreshTokenValue,
+    }
+
+    // Another function instance may already have rotated the one-time refresh
+    // token. Always prefer the freshly persisted pair before using our copy.
+    if (await this.loadRotatedTokens(original)) return
+
+    const acquired = (await this.hooks.tryAcquireRefreshLease?.()) ?? true
+    if (!acquired) {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise((r) => setTimeout(r, 300))
+        if (await this.loadRotatedTokens(original)) return
+      }
+      const error: any = new Error(
+        "115 网盘 token 正由另一实例刷新，请稍后重试",
+      )
+      error.code = 429
+      throw error
+    }
+
+    await this.waitRateLimit()
     const form = new URLSearchParams()
     form.set("refresh_token", this.refreshTokenValue)
     const res = await this.fetchWithRetry(ApiRefreshToken, {
@@ -136,14 +196,26 @@ export class Pan115Client {
         `115 网盘 token 刷新失败（code ${data.code} ${data.message}）：请确认 refresh_token 有效。`,
       )
     }
-    this.accessToken = data.data.access_token
-    this.refreshTokenValue = data.data.refresh_token
-    this.addition.access_token = this.accessToken
-    this.addition.refresh_token = this.refreshTokenValue
-    this.onTokenUpdate?.({
+    this.adoptTokens({
+      access_token: data.data.access_token,
+      refresh_token: data.data.refresh_token,
+    })
+    // The rotated refresh token must reach persistent storage before another
+    // request is allowed to continue. Fire-and-forget persistence can lose the
+    // only valid token when a serverless invocation ends.
+    await this.hooks.onTokenUpdate?.({
       access_token: this.accessToken,
       refresh_token: this.refreshTokenValue,
     })
+  }
+
+  public async refreshToken(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight
+    const task = this.performRefreshToken().finally(() => {
+      if (this.refreshInFlight === task) this.refreshInFlight = null
+    })
+    this.refreshInFlight = task
+    return task
   }
 
   // ---- Core request (对应 SDK authRequest) ----
@@ -212,6 +284,7 @@ export class Pan115Client {
       if (isAuthError(code) && !skipAuthRetry) {
         // token 失效 → 刷新一次并重试（防递归：skipAuthRetry=true 时不再刷新）
         await this.refreshToken()
+        await this.waitRateLimit()
         const retry = await doReq()
         body = retry.body
         const retryState = body?.state
@@ -222,6 +295,7 @@ export class Pan115Client {
           `115 网盘 API 错误（code ${body?.code} ${body?.message}）`,
         )
         err.code = Number(body?.code ?? 0)
+        await this.hooks.reportApiError?.(err.code)
         throw err
       }
       // 对象不存在错误（430004）——SDK ErrObjectNotFound
@@ -234,6 +308,7 @@ export class Pan115Client {
         `115 网盘 API 错误（code ${code} ${body?.message || ""}）`,
       )
       err.code = code
+      await this.hooks.reportApiError?.(code)
       throw err
     }
     return body

@@ -26,6 +26,7 @@ const mod = await import("./db")
 
 const {
   getDb,
+  getDbFresh,
   saveDb,
   setEnvCtx,
   __resetDbCacheForTest,
@@ -51,7 +52,14 @@ function createCountingBackend(initial: any) {
       return true
     },
   }
-  return { backend, stats, getData: () => data }
+  return {
+    backend,
+    stats,
+    getData: () => data,
+    setData: (next: any) => {
+      data = JSON.parse(JSON.stringify(next))
+    },
+  }
 }
 
 const SAMPLE = {
@@ -85,6 +93,42 @@ test("getDb: 重复无参调用只触发一次后端 load（缓存命中）", as
   assert.equal(d, a)
 })
 
+test("getDbFresh: 绕过短时缓存并读取其他实例刚写入的数据", async () => {
+  __resetDbCacheForTest()
+  const { backend, stats, setData } = createCountingBackend(SAMPLE)
+  __setStoreBackendLoaderForTest(async () => backend)
+
+  setEnvCtx({ DB_DRIVER: "counting" })
+
+  const cached = await getDb()
+  assert.equal(
+    cached.settings.find((item: any) => item.key === "site_title")?.value,
+    "OpenList",
+  )
+  assert.equal(stats.load, 1)
+
+  // 模拟另一个函数实例完成 refresh_token 轮换并写入同一持久化后端。
+  setData({
+    ...SAMPLE,
+    settings: [{ key: "site_title", value: "Rotated" }],
+  })
+
+  const stillCached = await getDb()
+  assert.equal(
+    stillCached.settings.find((item: any) => item.key === "site_title")?.value,
+    "OpenList",
+  )
+  assert.equal(stats.load, 1, "普通 getDb() 在 TTL 内仍应命中缓存")
+
+  const [fresh, sameFresh] = await Promise.all([getDbFresh(), getDbFresh()])
+  assert.equal(
+    fresh.settings.find((item: any) => item.key === "site_title")?.value,
+    "Rotated",
+  )
+  assert.equal(sameFresh, fresh, "并发 getDbFresh() 应合并为同一次后端读取")
+  assert.equal(stats.load, 2, "getDbFresh() 必须强制重新读取后端")
+})
+
 test("getDb: 并发无参调用合并为一次 load（in-flight 去重）", async () => {
   __resetDbCacheForTest()
   const { backend, stats } = createCountingBackend(SAMPLE)
@@ -116,7 +160,10 @@ test("getDb: saveDb 后无参读取可观察到最新写入（写后读一致）
   await getDb()
   assert.equal(stats.load, 1)
 
-  const next = { ...SAMPLE, settings: [{ key: "site_title", value: "Changed" }] }
+  const next = {
+    ...SAMPLE,
+    settings: [{ key: "site_title", value: "Changed" }],
+  }
   await saveDb(next)
   // 注意：saveDb 内部可能同时写入加密密钥等辅助数据，因此不断言 save 恰好为 1，
   // 只要求确实发生过持久化写入。
