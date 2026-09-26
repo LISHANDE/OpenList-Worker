@@ -61,10 +61,29 @@ interface Pan115GetPerf {
   downUrlMs: number
 }
 
+interface Pan115RuntimeCache {
+  fileCache: Map<string, { file: Pan115File; expire: number }>
+  dirListCache: Map<string, { files: Pan115File[]; expire: number }>
+  dirListInflight: Map<string, Promise<Pan115File[]>>
+  linkCache: Map<string, { url: string; expire: number }>
+}
+
+const ERR_PARENT_NOT_FOUND = 20009
+
+function errorCode(error: unknown): number {
+  return Number((error as any)?.code || 0)
+}
+
 export class Pan115Driver implements StorageDriver {
   private client: Pan115Client
   private addition: Pan115Addition
   private pageSize = 200
+  /**
+   * Drivers are recreated for each OpenList request, while an EdgeOne function
+   * isolate is often kept warm. Keep the short-lived read caches at isolate
+   * scope so a media scanner's repeated PROPFINDs do not re-query 115.
+   */
+  private static runtimeCaches = new Map<string, Pan115RuntimeCache>()
   /** root 非默认时，路径前缀（Go Init 计算 parentPath） */
   private parentPath = "/"
   /** cache: 物理路径 → fid（复用） */
@@ -88,9 +107,39 @@ export class Pan115Driver implements StorageDriver {
   private linkCache = new Map<string, { url: string; expire: number }>()
   private static readonly LINK_TTL_MS = 30 * 60 * 1000
 
-  constructor(addition: Pan115Addition, hooks: Pan115ClientHooks = {}) {
+  constructor(
+    addition: Pan115Addition,
+    hooks: Pan115ClientHooks = {},
+    cacheScope = "default",
+  ) {
     this.addition = normalizePan115Addition(addition)
     this.client = new Pan115Client(this.addition, hooks)
+    const cache = Pan115Driver.getRuntimeCache(cacheScope)
+    this.fileCache = cache.fileCache
+    this.dirListCache = cache.dirListCache
+    this.dirListInflight = cache.dirListInflight
+    this.linkCache = cache.linkCache
+  }
+
+  private static getRuntimeCache(scope: string): Pan115RuntimeCache {
+    const key = String(scope || "default").slice(0, 160)
+    let cache = Pan115Driver.runtimeCaches.get(key)
+    if (!cache) {
+      // Bound memory for long-lived isolates that have seen many mount ids.
+      if (Pan115Driver.runtimeCaches.size >= 32) {
+        Pan115Driver.runtimeCaches.delete(
+          Pan115Driver.runtimeCaches.keys().next().value!,
+        )
+      }
+      cache = {
+        fileCache: new Map(),
+        dirListCache: new Map(),
+        dirListInflight: new Map(),
+        linkCache: new Map(),
+      }
+      Pan115Driver.runtimeCaches.set(key, cache)
+    }
+    return cache
   }
 
   /**
@@ -211,7 +260,7 @@ export class Pan115Driver implements StorageDriver {
     let total = 0
     for (;;) {
       if (!this.reserve()) break
-      const { files, count } = await this.client.getFiles({
+      const { files, count } = await this.getFilesWithParentRecovery({
         cid,
         limit: this.pageSize,
         offset,
@@ -270,10 +319,11 @@ export class Pan115Driver implements StorageDriver {
     } catch (e: any) {
       // folder/get_info 在部分有效路径上也会返回 20009（父目录不存在）。
       // 这些错误都回退到逐级列目录解析，避免冷启动节点因没有 fid 缓存而概率失败。
+      const code = errorCode(e)
       if (
-        e?.code !== ERR_OBJECT_NOT_FOUND &&
-        e?.code !== 990002 &&
-        e?.code !== 20009
+        code !== ERR_OBJECT_NOT_FOUND &&
+        code !== 990002 &&
+        code !== ERR_PARENT_NOT_FOUND
       ) {
         throw e
       }
@@ -297,7 +347,7 @@ export class Pan115Driver implements StorageDriver {
         continue
       }
       if (!this.reserve()) throw new Error("subrequest budget exceeded")
-      const { files } = await this.client.getFiles({
+      const { files } = await this.getFilesWithParentRecovery({
         cid,
         limit: 1000,
         offset: 0,
@@ -355,7 +405,7 @@ export class Pan115Driver implements StorageDriver {
     for (;;) {
       if (!this.reserve()) throw new Error("subrequest budget exceeded")
       const listStarted = Date.now()
-      const { files, count } = await this.client.getFiles({
+      const { files, count } = await this.getFilesWithParentRecovery({
         cid: parentId,
         limit: Math.max(this.pageSize, 1000),
         offset,
@@ -393,6 +443,26 @@ export class Pan115Driver implements StorageDriver {
       offset += files.length
     }
     throw new Error(`file not found: ${rawName}`)
+  }
+
+  /**
+   * 115 occasionally returns 20009 for an otherwise valid parent immediately
+   * after a high-concurrency directory scan. Retrying once through the shared
+   * limiter recovers those transient responses without turning real missing
+   * folders into a retry loop.
+   */
+  private async getFilesWithParentRecovery(
+    opts: Parameters<Pan115Client["getFiles"]>[0],
+  ): Promise<Awaited<ReturnType<Pan115Client["getFiles"]>>> {
+    try {
+      return await this.client.getFiles(opts)
+    } catch (error) {
+      if (errorCode(error) !== ERR_PARENT_NOT_FOUND) throw error
+      console.warn(
+        `[115open] getFiles returned 20009 for cid=${opts.cid}; retrying once`,
+      )
+      return await this.client.getFiles(opts)
+    }
   }
 
   async get(

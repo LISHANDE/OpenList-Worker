@@ -613,50 +613,54 @@ async function createDriver(
         refresh_token: String(latest.refresh_token),
       }
     }
-    driver = new Pan115Driver(addition, {
-      beforeRequest: () => coordinator.beforeRequest(),
-      reportApiError: (code) => coordinator.reportApiError(code),
-      tryAcquireRefreshLease: () => coordinator.tryAcquireRefreshLease(),
-      syncLatestTokens: () => readLatestTokens(),
-      onTokenUpdate: async (tokens) => {
-        // 持久化刷新后的 access_token / refresh_token，避免冷启动重复刷新
-        let lastError: unknown
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            // Refresh tokens are one-time values. Bypass the 15-second DB cache
-            // so an old request snapshot cannot overwrite a token rotated by
-            // another function instance.
-            const db = await getDbFresh()
-            const st = (db.storages || []).find(
-              (s: any) => String(s.id) === String(storageConfig?.id),
-            )
-            if (!st) {
-              throw new Error("115 storage disappeared during token refresh")
-            }
-            const stAddition =
-              typeof st.addition === "string"
-                ? JSON.parse(st.addition || "{}")
-                : st.addition || {}
-            stAddition.access_token = tokens.access_token
-            stAddition.refresh_token = tokens.refresh_token
-            st.addition = JSON.stringify(stAddition)
-            const saved = await saveDb(db)
-            if (!saved) throw new Error("115 token persistence was rejected")
-            storageConfig.addition = st.addition
-            return
-          } catch (error) {
-            lastError = error
-            if (attempt < 2) {
-              await new Promise((resolve) =>
-                setTimeout(resolve, 100 * (attempt + 1)),
+    driver = new Pan115Driver(
+      addition,
+      {
+        beforeRequest: () => coordinator.beforeRequest(),
+        reportApiError: (code) => coordinator.reportApiError(code),
+        tryAcquireRefreshLease: () => coordinator.tryAcquireRefreshLease(),
+        syncLatestTokens: () => readLatestTokens(),
+        onTokenUpdate: async (tokens) => {
+          // 持久化刷新后的 access_token / refresh_token，避免冷启动重复刷新
+          let lastError: unknown
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              // Refresh tokens are one-time values. Bypass the 15-second DB cache
+              // so an old request snapshot cannot overwrite a token rotated by
+              // another function instance.
+              const db = await getDbFresh()
+              const st = (db.storages || []).find(
+                (s: any) => String(s.id) === String(storageConfig?.id),
               )
+              if (!st) {
+                throw new Error("115 storage disappeared during token refresh")
+              }
+              const stAddition =
+                typeof st.addition === "string"
+                  ? JSON.parse(st.addition || "{}")
+                  : st.addition || {}
+              stAddition.access_token = tokens.access_token
+              stAddition.refresh_token = tokens.refresh_token
+              st.addition = JSON.stringify(stAddition)
+              const saved = await saveDb(db)
+              if (!saved) throw new Error("115 token persistence was rejected")
+              storageConfig.addition = st.addition
+              return
+            } catch (error) {
+              lastError = error
+              if (attempt < 2) {
+                await new Promise((resolve) =>
+                  setTimeout(resolve, 100 * (attempt + 1)),
+                )
+              }
             }
           }
-        }
-        console.warn("[115open] failed to persist token:", lastError)
-        throw lastError
+          console.warn("[115open] failed to persist token:", lastError)
+          throw lastError
+        },
       },
-    })
+      `${storageId}:${addition.root_id || "0"}`,
+    )
     await driver.init?.()
   } else if (
     normDriver === "github" ||
